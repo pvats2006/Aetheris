@@ -1,5 +1,6 @@
 import { useLocation } from 'react-router-dom'
 import { Menu, Bell, Sun, Moon } from 'lucide-react'
+import BackendStatus from '../ui/BackendStatus'
 
 const PAGE_TITLES = {
     '/': 'Dashboard',
@@ -59,6 +60,9 @@ export default function Navbar({ onMenuClick, isDark, toggleTheme, unreadCount, 
                     </span>
                     <span className="text-xs font-medium text-green-400">System Active</span>
                 </div>
+
+                {/* Backend health badge */}
+                <BackendStatus />
 
                 {/* Theme toggle */}
                 <button

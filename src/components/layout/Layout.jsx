@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Routes, Route } from 'react-router-dom'
-import { Bell, X, CheckCheck, Settings } from 'lucide-react'
+import { Bell, X, CheckCheck, Settings, ShieldCheck } from 'lucide-react'
 
 import Sidebar from './Sidebar'
 import Navbar from './Navbar'
 import Toast from '../ui/Toast'
-import { useAlerts } from '../../hooks/useAlerts'
 import { toast } from '../../utils/toast'
+import { useAetheris } from '../../context/AetherisContext'
 
 import DashboardPage from '../../pages/DashboardPage'
 import PreOpPage from '../../pages/PreOpPage'
@@ -15,25 +15,37 @@ import PostOpPage from '../../pages/PostOpPage'
 import ReportsPage from '../../pages/ReportsPage'
 import ComponentShowcase from '../../pages/ComponentShowcase'
 
-/* ── Notification panel ──────────────────────────────────── */
-const NOTIF_DATA = [
-    { id: 1, type: 'critical', title: 'SpO₂ Drop — David Kim', msg: 'SpO₂ fell to 91%. Immediate action required.', time: '2 min ago', read: false },
-    { id: 2, type: 'warning', title: 'Elevated BP', msg: 'Robert Mills: 158/100 mmHg. Monitor closely.', time: '5 min ago', read: false },
-    { id: 3, type: 'info', title: 'Operative Note Generated', msg: 'AI auto-generated note for Maria Alvarez.', time: '12 min ago', read: false },
-    { id: 4, type: 'success', title: 'Discharge Complete', msg: 'Lisa Chen successfully discharged.', time: '30 min ago', read: true },
-    { id: 5, type: 'info', title: 'New Patient Admitted', msg: 'Omar Farouk admitted to Pre-Op Bay 2.', time: '45 min ago', read: true },
-]
+/* ── Helpers ─────────────────────────────────────────────────────────────── */
+function timeAgo(timestamp) {
+    if (!timestamp) return 'just now'
+    // Accept ISO strings or already-formatted strings like "2 min ago"
+    if (typeof timestamp === 'string' && !timestamp.includes('T')) return timestamp
+    const diff = Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000)
+    if (diff < 60) return `${diff}s ago`
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+    return `${Math.floor(diff / 86400)}d ago`
+}
 
 const NOTIF_STYLE = {
     critical: { dot: 'bg-red-500', badge: 'bg-red-900/40 text-red-400 border border-red-800/40' },
     warning: { dot: 'bg-amber-500', badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40' },
     info: { dot: 'bg-blue-500', badge: 'bg-blue-900/40 text-blue-400 border border-blue-800/40' },
     success: { dot: 'bg-green-500', badge: 'bg-green-900/40 text-green-400 border border-green-800/40' },
+    // severity aliases
+    HIGH: { dot: 'bg-red-500', badge: 'bg-red-900/40 text-red-400 border border-red-800/40' },
+    MEDIUM: { dot: 'bg-amber-500', badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40' },
+    LOW: { dot: 'bg-blue-500', badge: 'bg-blue-900/40 text-blue-400 border border-blue-800/40' },
 }
 
+/* ── Notification panel ──────────────────────────────────────────────────── */
 function NotificationPanel({ open, onClose }) {
-    const [notifs, setNotifs] = useState(NOTIF_DATA)
-    const unread = notifs.filter(n => !n.read).length
+    const { alerts, unreadAlertCount, acknowledgeAlert, acknowledgeAll } = useAetheris()
+
+    const styleFor = (alert) =>
+        NOTIF_STYLE[alert.type] ||
+        NOTIF_STYLE[alert.severity] ||
+        NOTIF_STYLE.info
 
     return (
         <>
@@ -44,20 +56,21 @@ function NotificationPanel({ open, onClose }) {
         z-50 flex flex-col shadow-2xl transition-transform duration-300 ease-out
         ${open ? 'translate-x-0' : 'translate-x-full'}`}>
 
+                {/* Header */}
                 <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800 flex-shrink-0">
                     <div className="flex items-center gap-2">
                         <Bell size={16} className="text-teal-400" />
                         <h3 className="text-white font-semibold text-sm">Notifications</h3>
-                        {unread > 0 && (
+                        {unreadAlertCount > 0 && (
                             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-500 text-white">
-                                {unread}
+                                {unreadAlertCount}
                             </span>
                         )}
                     </div>
                     <div className="flex items-center gap-2">
-                        {unread > 0 && (
+                        {unreadAlertCount > 0 && (
                             <button
-                                onClick={() => setNotifs(n => n.map(x => ({ ...x, read: true })))}
+                                onClick={acknowledgeAll}
                                 className="text-[10px] text-teal-400 hover:text-teal-300 font-medium flex items-center gap-1"
                             >
                                 <CheckCheck size={12} /> Mark all read
@@ -69,30 +82,54 @@ function NotificationPanel({ open, onClose }) {
                     </div>
                 </div>
 
+                {/* Alert list */}
                 <div className="flex-1 overflow-y-auto divide-y divide-gray-800">
-                    {notifs.map(n => {
-                        const s = NOTIF_STYLE[n.type]
-                        return (
-                            <div
-                                key={n.id}
-                                className={`px-5 py-4 hover:bg-gray-800/50 transition-colors cursor-pointer
-                  ${!n.read ? 'bg-gray-800/20' : ''}`}
-                                onClick={() => setNotifs(prev => prev.map(x => x.id === n.id ? { ...x, read: true } : x))}
-                            >
-                                <div className="flex items-start gap-3">
-                                    <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${n.read ? 'bg-gray-700' : s.dot}`} />
-                                    <div className="flex-1 min-w-0">
-                                        <p className={`text-xs font-semibold mb-0.5 ${n.read ? 'text-gray-400' : 'text-white'}`}>{n.title}</p>
-                                        <p className="text-xs text-gray-500 leading-snug">{n.msg}</p>
-                                        <p className="text-[10px] text-gray-600 mt-1">{n.time}</p>
-                                    </div>
-                                    {!n.read && (
-                                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${s.badge} flex-shrink-0`}>NEW</span>
-                                    )}
-                                </div>
+                    {alerts.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-16 gap-3 text-center px-6">
+                            <div className="w-12 h-12 rounded-full bg-green-900/30 border border-green-800/30 flex items-center justify-center">
+                                <ShieldCheck size={22} className="text-green-400" />
                             </div>
-                        )
-                    })}
+                            <p className="text-green-400 text-sm font-semibold">No active alerts</p>
+                            <p className="text-gray-500 text-xs">All systems normal</p>
+                        </div>
+                    ) : (
+                        alerts.map(alert => {
+                            const s = styleFor(alert)
+                            const isRead = alert.acknowledged
+                            return (
+                                <div
+                                    key={alert.id}
+                                    className={`px-5 py-4 hover:bg-gray-800/50 transition-colors
+                      ${!isRead ? 'bg-gray-800/20' : ''}`}
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${isRead ? 'bg-gray-700' : s.dot}`} />
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`text-xs font-semibold mb-0.5 ${isRead ? 'text-gray-400' : 'text-white'}`}>
+                                                {alert.title}
+                                            </p>
+                                            <p className="text-xs text-gray-500 leading-snug">{alert.message}</p>
+                                            <p className="text-[10px] text-gray-600 mt-1">
+                                                {timeAgo(alert.timestamp || alert.time)}
+                                            </p>
+                                        </div>
+                                        {!isRead && (
+                                            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${s.badge}`}>NEW</span>
+                                                <button
+                                                    onClick={() => acknowledgeAlert(alert.id)}
+                                                    className="text-[10px] text-teal-400 hover:text-teal-300 font-semibold transition-colors"
+                                                    title="Acknowledge"
+                                                >
+                                                    ✓
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )
+                        })
+                    )}
                 </div>
             </div>
         </>
@@ -116,7 +153,7 @@ function SettingsPage() {
 
 /* ── Layout — top-level shell rendered inside BrowserRouter ─ */
 export default function Layout() {
-    const { unreadCount } = useAlerts()
+    const { unreadAlertCount } = useAetheris()
 
     /* Mobile sidebar */
     const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -146,7 +183,7 @@ export default function Layout() {
             <Sidebar
                 open={sidebarOpen}
                 onClose={closeSidebar}
-                unreadCount={unreadCount}
+                unreadCount={unreadAlertCount}
             />
 
             {/* Main content column */}
@@ -155,7 +192,7 @@ export default function Layout() {
                     onMenuClick={() => setSidebarOpen(true)}
                     isDark={isDark}
                     toggleTheme={toggleTheme}
-                    unreadCount={unreadCount}
+                    unreadCount={unreadAlertCount}
                     onBellClick={() => setNotifOpen(o => !o)}
                 />
 
@@ -173,7 +210,7 @@ export default function Layout() {
                 </main>
             </div>
 
-            {/* Notification panel */}
+            {/* Notification panel — driven by global context */}
             <NotificationPanel open={notifOpen} onClose={() => setNotifOpen(false)} />
 
             {/* Toast notifications */}

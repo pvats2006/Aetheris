@@ -4,25 +4,18 @@ import {
     FileText, Download, Send, Copy,
     AlertTriangle, CheckCircle, ShieldAlert,
     Sparkles, BrainCircuit,
-    Bell, Clock, User,
+    Bell, Clock, User, Loader2,
 } from 'lucide-react'
 import SectionHeader from '../components/SectionHeader'
 import StatusBadge from '../components/StatusBadge'
 import RiskDonut from '../components/charts/RiskDonut'
+import ApiErrorBanner from '../components/ui/ApiErrorBanner'
+import { getComplicationRisk, generateReport, sendToEHR } from '../api/client'
+import { useAetheris } from '../context/AetherisContext'
 
 /* ─────────────────────────────────────────────────────────
-   RECOVERY MONITOR DATA
+   SHARED HELPERS
 ───────────────────────────────────────────────────────── */
-const PATIENT = {
-    name: 'Maria Alvarez',
-    age: 62,
-    surgery: 'Laparoscopic Cholecystectomy',
-    surgeon: 'Dr. Jane Doe',
-    completedAt: '08:05',
-    room: 'PACU-4',
-    bloodType: 'AB+',
-}
-
 function useElapsed(startHHMM) {
     const [elapsed, setElapsed] = useState('')
     useEffect(() => {
@@ -36,7 +29,9 @@ function useElapsed(startHHMM) {
             const hh = Math.floor(diff / 3600)
             const mm = Math.floor((diff % 3600) / 60)
             const ss = diff % 60
-            setElapsed(`${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`)
+            setElapsed(
+                `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+            )
         }
         calc()
         const id = setInterval(calc, 1000)
@@ -45,7 +40,27 @@ function useElapsed(startHHMM) {
     return elapsed
 }
 
-const VITALS = [
+const DOT = { normal: 'bg-green-500', borderline: 'bg-amber-500', critical: 'bg-red-500' }
+const DOT_GLOW = { normal: 'shadow-green-500/60', borderline: 'shadow-amber-500/60', critical: 'shadow-red-500/60' }
+
+const PAIN_COLOR = p => p <= 3 ? 'text-green-400' : p <= 6 ? 'text-amber-400' : 'text-red-400'
+const PAIN_BG = p => p <= 3 ? 'bg-green-500' : p <= 6 ? 'bg-amber-500' : 'bg-red-500'
+const PAIN_LABEL = p => p <= 3 ? 'Mild' : p <= 6 ? 'Moderate' : 'Severe'
+
+const RISK_STYLE = {
+    low: { bar: 'bg-green-500', badge: 'bg-green-900/40 text-green-400 border border-green-800/40', label: 'Low' },
+    medium: { bar: 'bg-amber-500', badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40', label: 'Medium' },
+    high: { bar: 'bg-red-500', badge: 'bg-red-900/40 text-red-400 border border-red-800/40', label: 'High' },
+    // uppercase variants from API
+    LOW: { bar: 'bg-green-500', badge: 'bg-green-900/40 text-green-400 border border-green-800/40', label: 'Low' },
+    MEDIUM: { bar: 'bg-amber-500', badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40', label: 'Medium' },
+    HIGH: { bar: 'bg-red-500', badge: 'bg-red-900/40 text-red-400 border border-red-800/40', label: 'High' },
+}
+
+/* ─────────────────────────────────────────────────────────
+   RECOVERY MONITOR
+───────────────────────────────────────────────────────── */
+const STATIC_VITALS = [
     { label: 'Heart Rate', value: '74 bpm', status: 'normal' },
     { label: 'SpO₂', value: '98%', status: 'normal' },
     { label: 'Blood Pressure', value: '138/86', status: 'borderline' },
@@ -54,107 +69,17 @@ const VITALS = [
     { label: 'EtCO₂', value: '38 mmHg', status: 'normal' },
 ]
 
-const DOT = {
-    normal: 'bg-green-500',
-    borderline: 'bg-amber-500',
-    critical: 'bg-red-500',
-}
-const DOT_GLOW = {
-    normal: 'shadow-green-500/60',
-    borderline: 'shadow-amber-500/60',
-    critical: 'shadow-red-500/60',
-}
-
-const PAIN_COLOR = p => p <= 3 ? 'text-green-400' : p <= 6 ? 'text-amber-400' : 'text-red-400'
-const PAIN_BG = p => p <= 3 ? 'bg-green-500' : p <= 6 ? 'bg-amber-500' : 'bg-red-500'
-const PAIN_LABEL = p => p <= 3 ? 'Mild' : p <= 6 ? 'Moderate' : 'Severe'
-
-/* ─────────────────────────────────────────────────────────
-   REPORTS DATA
-───────────────────────────────────────────────────────── */
-const OPERATIVE_NOTE = `OPERATIVE NOTE
-══════════════════════════════════════
-Patient:    Maria Alvarez, 62F
-Surgeon:    Dr. Jane Doe
-Date:       28 Feb 2026
-Procedure:  Laparoscopic Cholecystectomy
-Anaesthesia:General (Dr. Marcus Lee)
-Duration:   2h 05m  |  EBL: < 50 mL
-
-PRE-OPERATIVE DIAGNOSIS
-  Symptomatic cholelithiasis with acute
-  cholecystitis (confirmed USS 27 Feb).
-
-PROCEDURE
-  1. Patient positioned supine under GA.
-  2. Hasson technique for peritoneal access.
-  3. Four-port laparoscopic approach.
-  4. Gallbladder dissected from liver bed.
-  5. Cystic duct and artery clipped ×2,
-     divided. Specimen retrieved in bag.
-  6. Port-sites closed. Dressings applied.
-
-POST-OPERATIVE STATUS
-  Patient transferred to PACU in stable
-  condition. Observations satisfactory.
-  IV analgesia commenced. Diet as tolerated
-  from 4 hours post-op.
-
-Signed: Dr. J. Doe  |  08:12, 28 Feb 2026`
-
-const DISCHARGE_SUMMARY = `DISCHARGE SUMMARY
-══════════════════════════════════════
-Patient:    Maria Alvarez, 62F, AB+
-Admission:  27 Feb 2026  →  28 Feb 2026
-Diagnosis:  Acute cholecystitis
-Procedure:  Laparoscopic cholecystectomy
-Surgeon:    Dr. Jane Doe
-
-HOSPITAL COURSE
-  Uncomplicated laparoscopic procedure.
-  Post-op pain managed with IV morphine
-  and ketorolac (transitioned to oral).
-  Diet tolerated. Wound clean/dry/intact.
-
-DISCHARGE MEDICATIONS
-  • Paracetamol 1g QDS (5 days)
-  • Ibuprofen 400mg TDS with food (5 days)
-  • Omeprazole 20mg OD (14 days)
-
-FOLLOW-UP
-  GP review in 7 days.
-  Outpatient clinic in 4 weeks.
-  Return immediately if: fever >38.5°C,
-  worsening pain, jaundice, wound dehiscence.
-
-Signed: Dr. J. Doe  |  15:00, 28 Feb 2026`
-
-/* ─────────────────────────────────────────────────────────
-   RISK PREDICTOR DATA
-───────────────────────────────────────────────────────── */
-const RISKS = [
-    { label: 'DVT', pct: 12, level: 'low' },
-    { label: 'Infection', pct: 8, level: 'low' },
-    { label: 'Pneumonia', pct: 23, level: 'medium' },
-    { label: 'Readmission', pct: 18, level: 'low' },
-]
-
-const RISK_STYLE = {
-    low: { bar: 'bg-green-500', badge: 'bg-green-900/40 text-green-400 border border-green-800/40', label: 'Low' },
-    medium: { bar: 'bg-amber-500', badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40', label: 'Medium' },
-    high: { bar: 'bg-red-500', badge: 'bg-red-900/40 text-red-400 border border-red-800/40', label: 'High' },
-}
-
-const overallScore = Math.round(RISKS.reduce((s, r) => s + r.pct, 0) / RISKS.length)
-
-
-/* ═══════════════════════════════════════════════════════
-   COLUMN 1 — RECOVERY MONITOR
-═══════════════════════════════════════════════════════ */
-function RecoveryMonitor() {
+function RecoveryMonitor({ currentPatient }) {
     const [pain, setPain] = useState(3)
     const [alerted, setAlerted] = useState(false)
-    const elapsed = useElapsed(PATIENT.completedAt)
+
+    const name = currentPatient?.name || 'Unknown Patient'
+    const age = currentPatient?.age || '—'
+    const room = currentPatient?.room || 'PACU'
+    const blood = currentPatient?.blood_type || '—'
+    const surgery = currentPatient?.surgery_type || 'N/A'
+    const initials = name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
+    const elapsed = useElapsed('08:05')
 
     return (
         <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800 flex flex-col gap-4">
@@ -168,23 +93,21 @@ function RecoveryMonitor() {
                 <div className="flex items-center gap-3 mb-3">
                     <div className="w-10 h-10 rounded-full bg-gradient-to-br from-teal-500 to-teal-700
             flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
-                        MA
+                        {initials}
                     </div>
                     <div>
-                        <p className="text-white font-semibold text-sm">{PATIENT.name}</p>
-                        <p className="text-xs text-gray-400">{PATIENT.age}F · {PATIENT.bloodType} · {PATIENT.room}</p>
+                        <p className="text-white font-semibold text-sm">{name}</p>
+                        <p className="text-xs text-gray-400">{age} · {blood} · {room}</p>
                     </div>
                 </div>
                 <div className="space-y-1.5 text-xs">
                     <div className="flex justify-between">
                         <span className="text-gray-500">Procedure</span>
-                        <span className="text-gray-200 font-medium text-right max-w-[60%] leading-tight">
-                            {PATIENT.surgery}
-                        </span>
+                        <span className="text-gray-200 font-medium text-right max-w-[60%] leading-tight">{surgery}</span>
                     </div>
                     <div className="flex justify-between">
                         <span className="text-gray-500">Completed</span>
-                        <span className="text-gray-200 font-medium">{PATIENT.completedAt}</span>
+                        <span className="text-gray-200 font-medium">08:05</span>
                     </div>
                     <div className="flex justify-between">
                         <span className="text-gray-500">Elapsed</span>
@@ -195,18 +118,15 @@ function RecoveryMonitor() {
 
             {/* Recovery vitals */}
             <div>
-                <p className="text-[10px] text-gray-500 uppercase tracking-widest font-medium mb-2">
-                    Recovery Vitals
-                </p>
+                <p className="text-[10px] text-gray-500 uppercase tracking-widest font-medium mb-2">Recovery Vitals</p>
                 <div className="space-y-2">
-                    {VITALS.map(({ label, value, status }) => (
+                    {STATIC_VITALS.map(({ label, value, status }) => (
                         <div key={label}
                             className="flex items-center justify-between py-2 border-b border-gray-800/60 last:border-0">
                             <span className="text-xs text-gray-400">{label}</span>
                             <div className="flex items-center gap-2">
                                 <span className="text-xs font-semibold text-white">{value}</span>
-                                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT[status]}
-                  shadow-sm ${DOT_GLOW[status]}`} />
+                                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT[status]} shadow-sm ${DOT_GLOW[status]}`} />
                             </div>
                         </div>
                     ))}
@@ -220,29 +140,21 @@ function RecoveryMonitor() {
                     <div className="flex items-center gap-2">
                         <span className={`text-lg font-bold ${PAIN_COLOR(pain)}`}>{pain}</span>
                         <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full
-              ${pain <= 3
-                                ? 'bg-green-900/40 text-green-400 border border-green-800/40'
-                                : pain <= 6
-                                    ? 'bg-amber-900/40 text-amber-400 border border-amber-800/40'
-                                    : 'bg-red-900/40 text-red-400 border border-red-800/40'}`}
-                        >
+              ${pain <= 3 ? 'bg-green-900/40 text-green-400 border border-green-800/40'
+                                : pain <= 6 ? 'bg-amber-900/40 text-amber-400 border border-amber-800/40'
+                                    : 'bg-red-900/40 text-red-400 border border-red-800/40'}`}>
                             {PAIN_LABEL(pain)}
                         </span>
                     </div>
                 </div>
-
-                {/* Pain track + thumb */}
                 <div className="relative mb-1">
                     <div className="h-2 rounded-full bg-gray-800 overflow-hidden">
-                        <div
-                            className={`h-full rounded-full transition-all duration-300 ${PAIN_BG(pain)}`}
-                            style={{ width: `${pain * 10}%` }}
-                        />
+                        <div className={`h-full rounded-full transition-all duration-300 ${PAIN_BG(pain)}`}
+                            style={{ width: `${pain * 10}%` }} />
                     </div>
                     <input
                         type="range" min={0} max={10} step={1}
-                        value={pain}
-                        onChange={e => setPain(Number(e.target.value))}
+                        value={pain} onChange={e => setPain(Number(e.target.value))}
                         className="absolute inset-0 w-full opacity-0 cursor-pointer h-full"
                     />
                 </div>
@@ -266,19 +178,24 @@ function RecoveryMonitor() {
     )
 }
 
-/* ═══════════════════════════════════════════════════════
-   COLUMN 2 — AUTO-GENERATED REPORTS
-═══════════════════════════════════════════════════════ */
-function ReportsPanel() {
-    const [tab, setTab] = useState('operative')
-    const [copied, setCopied] = useState(false)
+/* ─────────────────────────────────────────────────────────
+   REPORTS PANEL
+───────────────────────────────────────────────────────── */
+function ReportsPanel({
+    currentPatient, currentSurgery,
+    activeReport, reportContent, reportLoading, reportStatus, sendingToEHR,
+    onGenerateReport, onSendToEHR, onCopy,
+}) {
+    const [tab, setTab] = useState('operative_note')
 
-    const content = tab === 'operative' ? OPERATIVE_NOTE : DISCHARGE_SUMMARY
+    const tabConfig = [
+        { key: 'operative_note', label: 'Operative Note' },
+        { key: 'discharge_summary', label: 'Discharge Summary' },
+    ]
 
-    const handleCopy = () => {
-        navigator.clipboard?.writeText(content)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 2000)
+    const handleTabClick = (key) => {
+        setTab(key)
+        onGenerateReport(key)
     }
 
     return (
@@ -292,13 +209,10 @@ function ReportsPanel() {
 
             {/* Tabs */}
             <div className="flex border-b border-gray-800">
-                {[
-                    { key: 'operative', label: 'Operative Note' },
-                    { key: 'discharge', label: 'Discharge Summary' },
-                ].map(({ key, label }) => (
+                {tabConfig.map(({ key, label }) => (
                     <button
                         key={key}
-                        onClick={() => setTab(key)}
+                        onClick={() => handleTabClick(key)}
                         className={`px-4 py-2.5 text-xs font-semibold transition-colors border-b-2 -mb-px
               ${tab === key
                                 ? 'border-teal-500 text-teal-400'
@@ -311,48 +225,63 @@ function ReportsPanel() {
 
             {/* Content */}
             <div className="bg-gray-800 rounded-xl p-4 text-xs text-gray-300 font-mono leading-relaxed
-        min-h-64 overflow-auto flex-1 whitespace-pre-wrap border border-gray-700/50">
-                {content}
+        min-h-64 overflow-auto flex-1 whitespace-pre-wrap border border-gray-700/50 relative">
+                {reportLoading ? (
+                    <div className="flex flex-col items-center justify-center h-48 gap-3">
+                        <Loader2 size={24} className="text-teal-400 animate-spin" />
+                        <p className="text-gray-500 text-xs">Generating report…</p>
+                    </div>
+                ) : reportContent ? (
+                    reportContent
+                ) : (
+                    <span className="text-gray-600">
+                        Select a report tab to generate content from the backend.
+                    </span>
+                )}
             </div>
+
+            {/* EHR status */}
+            {reportStatus === 'sent_to_ehr' && (
+                <div className="flex items-center gap-2 text-green-400 text-xs font-medium">
+                    <CheckCircle size={13} />
+                    Report successfully sent to EHR
+                </div>
+            )}
 
             {/* Actions */}
             <div className="flex gap-2 flex-wrap">
                 <button
-                    onClick={handleCopy}
+                    onClick={onCopy}
+                    disabled={!reportContent}
                     className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white
-            rounded-lg px-4 py-2 text-xs font-medium transition-all"
+            rounded-lg px-4 py-2 text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                     <Copy size={13} />
-                    {copied ? 'Copied!' : 'Copy'}
+                    Copy
                 </button>
-                <button className="flex items-center gap-2 bg-teal-600 hover:bg-teal-500 text-white
-          rounded-lg px-4 py-2 text-xs font-medium transition-all shadow-sm shadow-teal-900/30">
-                    <Download size={13} />
-                    Download PDF
-                </button>
-                <button className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white
-          rounded-lg px-4 py-2 text-xs font-medium transition-all shadow-sm shadow-blue-900/30">
-                    <Send size={13} />
-                    Send to EHR
+                <button
+                    onClick={onSendToEHR}
+                    disabled={!activeReport || sendingToEHR || reportStatus === 'sent_to_ehr'}
+                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white
+            rounded-lg px-4 py-2 text-xs font-medium transition-all shadow-sm shadow-blue-900/30
+            disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                    {sendingToEHR
+                        ? <Loader2 size={13} className="animate-spin" />
+                        : <Send size={13} />}
+                    {sendingToEHR ? 'Sending…' : reportStatus === 'sent_to_ehr' ? 'Sent ✓' : 'Send to EHR'}
                 </button>
             </div>
         </div>
     )
 }
 
-/* ═══════════════════════════════════════════════════════
-   COLUMN 3 — COMPLICATION RISK PREDICTOR
-═══════════════════════════════════════════════════════ */
-function RiskPredictor() {
-    const [generated, setGenerated] = useState(false)
-    const [loading, setLoading] = useState(false)
-
-    const handleGenerate = async () => {
-        setLoading(true)
-        await new Promise(r => setTimeout(r, 1800))
-        setGenerated(true)
-        setLoading(false)
-    }
+/* ─────────────────────────────────────────────────────────
+   RISK PREDICTOR
+───────────────────────────────────────────────────────── */
+function RiskPredictor({ complicationData, riskLoading, onRefresh }) {
+    const complications = complicationData?.complications || []
+    const overallScore = complicationData?.overall_score ?? null
 
     return (
         <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800 flex flex-col gap-4">
@@ -368,76 +297,86 @@ function RiskPredictor() {
                 </span>
             </div>
 
-            {/* Risk items */}
-            <div className="space-y-4">
-                {RISKS.map(({ label, pct, level }) => {
-                    const { bar, badge, label: lvlLabel } = RISK_STYLE[level]
-                    return (
-                        <div key={label}>
-                            <div className="flex items-center justify-between mb-1.5">
-                                <span className="text-xs text-gray-400 font-medium">{label} Risk</span>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-xs font-bold text-white">{pct}%</span>
-                                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${badge}`}>
-                                        {lvlLabel}
-                                    </span>
-                                </div>
-                            </div>
-                            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-                                <div
-                                    className={`h-full ${bar} rounded-full transition-all duration-700`}
-                                    style={{ width: `${pct}%` }}
-                                />
-                            </div>
-                        </div>
-                    )
-                })}
-            </div>
-
-            {/* Divider */}
-            <div className="border-t border-gray-800" />
-
-            {/* Overall donut */}
-            <div>
-                <p className="text-xs text-gray-400 font-medium mb-3 text-center">
-                    Overall Risk Score
-                </p>
-                <RiskDonut score={overallScore} />
-
-                <div className="flex justify-center gap-4 mt-1">
-                    {[
-                        { color: 'bg-amber-500', label: 'Risk' },
-                        { color: 'bg-gray-700', label: 'Clear' },
-                    ].map(({ color, label }) => (
-                        <div key={label} className="flex items-center gap-1.5">
-                            <span className={`w-2 h-2 rounded-sm ${color}`} />
-                            <span className="text-[10px] text-gray-500">{label}</span>
-                        </div>
-                    ))}
+            {riskLoading ? (
+                <div className="flex flex-col items-center justify-center py-10 gap-3">
+                    <Loader2 size={24} className="text-purple-400 animate-spin" />
+                    <p className="text-gray-500 text-xs">Fetching risk data…</p>
                 </div>
-            </div>
+            ) : complications.length > 0 ? (
+                <>
+                    {/* Risk items */}
+                    <div className="space-y-4">
+                        {complications.map((comp) => {
+                            const style = RISK_STYLE[comp.risk_level] || RISK_STYLE.low
+                            const pct = Math.min(100, Math.max(0, Math.round(comp.risk_pct ?? 0)))
+                            return (
+                                <div key={comp.name}>
+                                    <div className="flex items-center justify-between mb-1.5">
+                                        <span className="text-xs text-gray-400 font-medium">{comp.name} Risk</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs font-bold text-white">{pct}%</span>
+                                            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${style.badge}`}>
+                                                {style.label}
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                                        <div
+                                            className={`h-full ${style.bar} rounded-full transition-all duration-700`}
+                                            style={{ width: `${pct}%` }}
+                                        />
+                                    </div>
+                                </div>
+                            )
+                        })}
+                    </div>
 
-            {/* Generate button */}
+                    <div className="border-t border-gray-800" />
+
+                    {/* Overall donut */}
+                    {overallScore !== null && (
+                        <div>
+                            <p className="text-xs text-gray-400 font-medium mb-3 text-center">Overall Risk Score</p>
+                            <RiskDonut score={overallScore} />
+                            <div className="flex justify-center gap-4 mt-1">
+                                {[
+                                    { color: 'bg-amber-500', label: 'Risk' },
+                                    { color: 'bg-gray-700', label: 'Clear' },
+                                ].map(({ color, label }) => (
+                                    <div key={label} className="flex items-center gap-1.5">
+                                        <span className={`w-2 h-2 rounded-sm ${color}`} />
+                                        <span className="text-[10px] text-gray-500">{label}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </>
+            ) : (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                    <BrainCircuit size={28} className="text-gray-600 mb-3" />
+                    <p className="text-gray-500 text-sm">No risk data available</p>
+                    <p className="text-gray-600 text-xs mt-1">Select a patient to load complication risk</p>
+                </div>
+            )}
+
+            {/* Refresh button */}
             <button
-                onClick={handleGenerate}
-                disabled={loading}
+                onClick={onRefresh}
+                disabled={riskLoading}
                 className={`w-full rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2
-          transition-all ${loading
+          transition-all ${riskLoading
                         ? 'bg-purple-800 text-purple-200 cursor-not-allowed'
-                        : generated
+                        : complications.length > 0
                             ? 'bg-green-700 hover:bg-green-600 text-white'
                             : 'bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-900/30 active:scale-[0.98]'}`}
             >
-                {loading ? (
-                    <>
-                        <span className="w-4 h-4 border-2 border-purple-300 border-t-transparent
-              rounded-full animate-spin" />
-                        Generating…
-                    </>
-                ) : generated ? (
-                    <><CheckCircle size={15} /> Full Report Ready</>
+                {riskLoading ? (
+                    <><Loader2 size={15} className="animate-spin" /> Fetching…</>
+                ) : complications.length > 0 ? (
+                    <><CheckCircle size={15} /> Risk Data Loaded</>
                 ) : (
-                    <><Sparkles size={15} /> Generate Full Report</>
+                    <><Sparkles size={15} /> Load Risk Prediction</>
                 )}
             </button>
         </div>
@@ -445,9 +384,107 @@ function RiskPredictor() {
 }
 
 /* ═══════════════════════════════════════════════════════
-   PAGE ROOT
+   PAGE ROOT — holds all API state
 ═══════════════════════════════════════════════════════ */
 export default function PostOpPage() {
+    const { currentPatient, currentSurgery, setLoading } = useAetheris()
+
+    // ── Complication Risk state ──────────────────────────
+    const [complicationData, setComplicationData] = useState(null)
+    const [riskLoading, setRiskLoading] = useState(false)
+    const [apiError, setApiError] = useState(null) // Added apiError state
+
+    // ── Report state ─────────────────────────────────────
+    const [activeReport, setActiveReport] = useState(null)
+    const [reportContent, setReportContent] = useState('')
+    const [reportLoading, setReportLoading] = useState(false)
+    const [reportStatus, setReportStatus] = useState(null)   // null | 'sent_to_ehr'
+    const [sendingToEHR, setSendingToEHR] = useState(false)
+
+    // ── Toast helper (simple inline since no toast import in original) ──
+    const toast = {
+        success: (msg) => console.info('[toast:success]', msg),
+        error: (msg) => console.error('[toast:error]', msg),
+    }
+
+    // ── Fetch complication risk ───────────────────────────
+    const fetchComplicationRisk = useCallback(async () => {
+        setRiskLoading(true)
+        setLoading('postop', true)
+        try {
+            const result = await getComplicationRisk({
+                patient_id: currentPatient?.id || 'p001',
+                surgery_type: currentSurgery?.surgery_type || 'General',
+                age: currentPatient?.age,
+                asa_class: currentPatient?.asa_class || 'II',
+                diabetes: currentPatient?.medical_history?.includes('Diabetes') || false,
+                hypertension: currentPatient?.medical_history?.includes('Hypertension') || false,
+                cardiac_hx: false,
+                smoker: false,
+                duration_min: currentSurgery?.duration_minutes || 180,
+                blood_loss_ml: currentSurgery?.estimated_blood_loss_ml || 300,
+            })
+            setComplicationData(result)
+            setApiError(null) // Clear error on success
+        } catch (err) {
+            setApiError(err?.message || 'Could not load complication risk data') // Set error on failure
+        } finally {
+            setRiskLoading(false)
+            setLoading('postop', false)
+        }
+    }, [currentPatient, currentSurgery, setLoading])
+
+    // Auto-fetch when patient changes
+    useEffect(() => {
+        if (!currentPatient) return
+        fetchComplicationRisk()
+    }, [currentPatient?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    // ── Generate report ───────────────────────────────────
+    const handleGenerateReport = useCallback(async (reportType) => {
+        setReportLoading(true)
+        setReportStatus(null)
+        try {
+            const result = await generateReport({
+                patient_id: currentPatient?.id || 'p001',
+                surgery_id: currentSurgery?.id || null,
+                report_type: reportType,
+            })
+            setActiveReport(result)
+            setReportContent(result.content ?? JSON.stringify(result, null, 2))
+            toast.success('Report generated successfully!')
+        } catch {
+            toast.error('Report generation failed. Is backend running?')
+        } finally {
+            setReportLoading(false)
+        }
+    }, [currentPatient, currentSurgery])
+
+    // ── Send to EHR ───────────────────────────────────────
+    const handleSendToEHR = useCallback(async () => {
+        if (!activeReport) return
+        setSendingToEHR(true)
+        try {
+            const result = await sendToEHR({
+                report_id: activeReport.id,
+                ehr_system: 'mock_ehr',
+            })
+            toast.success(`Report sent! Confirmation: ${result.confirmation}`)
+            setReportStatus('sent_to_ehr')
+        } catch {
+            toast.error('Failed to send to EHR')
+        } finally {
+            setSendingToEHR(false)
+        }
+    }, [activeReport])
+
+    // ── Copy to clipboard ─────────────────────────────────
+    const handleCopy = useCallback(async () => {
+        if (!reportContent) return
+        await navigator.clipboard.writeText(reportContent)
+        toast.success('Report copied to clipboard!')
+    }, [reportContent])
+
     return (
         <div className="animate-fadeIn space-y-5">
             <SectionHeader
@@ -458,10 +495,36 @@ export default function PostOpPage() {
                 onAction={() => { }}
             />
 
+            {/* API error banner */}
+            {apiError && (
+                <ApiErrorBanner
+                    error={apiError}
+                    onRetry={() => { setApiError(null); fetchComplicationRisk() }}
+                    onDismiss={() => setApiError(null)}
+                />
+            )}
+
             <div className="grid grid-cols-3 gap-5">
-                <RecoveryMonitor />
-                <ReportsPanel />
-                <RiskPredictor />
+                <RecoveryMonitor currentPatient={currentPatient} />
+
+                <ReportsPanel
+                    currentPatient={currentPatient}
+                    currentSurgery={currentSurgery}
+                    activeReport={activeReport}
+                    reportContent={reportContent}
+                    reportLoading={reportLoading}
+                    reportStatus={reportStatus}
+                    sendingToEHR={sendingToEHR}
+                    onGenerateReport={handleGenerateReport}
+                    onSendToEHR={handleSendToEHR}
+                    onCopy={handleCopy}
+                />
+
+                <RiskPredictor
+                    complicationData={complicationData}
+                    riskLoading={riskLoading}
+                    onRefresh={fetchComplicationRisk}
+                />
             </div>
         </div>
     )

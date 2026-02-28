@@ -1,73 +1,50 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import {
     Brain, Sparkles, CheckCircle, AlertTriangle, Circle,
     ShieldCheck, Pill, ClipboardCheck, Loader2,
 } from 'lucide-react'
 import LoadingSpinner from '../components/LoadingSpinner'
 import SectionHeader from '../components/SectionHeader'
+import ApiErrorBanner from '../components/ui/ApiErrorBanner'
+import useApiCall from '../hooks/useApiCall'
+import { runPreOpAssessment } from '../api/client'
+import { useAetheris } from '../context/AetherisContext'
 
 /* ═══════════════════════════════════════════════════
    HELPERS
 ═══════════════════════════════════════════════════ */
-const FORM_DEFAULTS = {
-    name: '',
-    age: '',
-    gender: '',
-    surgeryType: '',
-    asa: '',
-    allergies: '',
-    medications: '',
-}
 
-/* Risk level derived from overall score */
-function riskLevel(score) {
-    if (score >= 65) return { label: 'High', color: 'text-red-400', bg: 'bg-red-500', ring: '#ef4444' }
-    if (score >= 35) return { label: 'Medium', color: 'text-amber-400', bg: 'bg-amber-500', ring: '#f59e0b' }
-    return { label: 'Low', color: 'text-green-400', bg: 'bg-green-500', ring: '#22c55e' }
+/** Normalise the risk_level string from the API to a display config */
+function riskLevelStyle(level = '') {
+    const l = level.toUpperCase()
+    if (l === 'CRITICAL') return { label: 'Critical', color: 'text-red-400', bg: 'bg-red-500', ring: '#ef4444', badge: 'bg-red-900/40 text-red-400 border border-red-800/40' }
+    if (l === 'HIGH') return { label: 'High', color: 'text-red-400', bg: 'bg-red-500', ring: '#ef4444', badge: 'bg-red-900/40 text-red-400 border border-red-800/40' }
+    if (l === 'MEDIUM') return { label: 'Medium', color: 'text-amber-400', bg: 'bg-amber-500', ring: '#f59e0b', badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40' }
+    return { label: 'Low', color: 'text-green-400', bg: 'bg-green-500', ring: '#22c55e', badge: 'bg-green-900/40 text-green-400 border border-green-800/40' }
 }
-
-/* Drug interactions seeded by medication text */
-const SAMPLE_INTERACTIONS = [
-    { drug: 'Warfarin', interacts: 'Aspirin', severity: 'high', effect: 'Increased bleeding risk' },
-    { drug: 'Metformin', interacts: 'Contrast dye', severity: 'medium', effect: 'Lactic acidosis risk' },
-    { drug: 'Lisinopril', interacts: 'Potassium', severity: 'low', effect: 'Hyperkalaemia risk' },
-]
 
 const SEV_STYLE = {
+    HIGH: { badge: 'bg-red-900/40 text-red-400 border border-red-800/40', dot: 'bg-red-500', label: 'High' },
+    MEDIUM: { badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40', dot: 'bg-amber-500', label: 'Medium' },
+    LOW: { badge: 'bg-yellow-900/40 text-yellow-400 border border-yellow-800/40', dot: 'bg-yellow-400', label: 'Low' },
+    // lower-case fallbacks
     high: { badge: 'bg-red-900/40 text-red-400 border border-red-800/40', dot: 'bg-red-500', label: 'High' },
     medium: { badge: 'bg-amber-900/40 text-amber-400 border border-amber-800/40', dot: 'bg-amber-500', label: 'Medium' },
-    low: { badge: 'bg-blue-900/40 text-blue-400 border border-blue-800/40', dot: 'bg-blue-500', label: 'Low' },
+    low: { badge: 'bg-yellow-900/40 text-yellow-400 border border-yellow-800/40', dot: 'bg-yellow-400', label: 'Low' },
 }
-
-const CHECKLIST_ITEMS = [
-    { id: 'consent', label: 'Consent form signed' },
-    { id: 'blood', label: 'Blood work reviewed' },
-    { id: 'imaging', label: 'Imaging reviewed' },
-    { id: 'npo', label: 'NPO status confirmed' },
-    { id: 'allergies', label: 'Allergies verified' },
-    { id: 'iv', label: 'IV access confirmed' },
-    { id: 'anesthesia', label: 'Anesthesia plan approved' },
-]
 
 /* ═══════════════════════════════════════════════════
    SVG CIRCULAR PROGRESS RING
 ═══════════════════════════════════════════════════ */
 function RiskRing({ score, color }) {
     const R = 52
-    const C = 2 * Math.PI * R          // circumference
-    const offset = C - (score / 100) * C
+    const C = 2 * Math.PI * R
+    const offset = C - (Math.min(100, Math.max(0, score)) / 100) * C
 
     return (
         <div className="relative inline-flex items-center justify-center">
             <svg width="130" height="130" viewBox="0 0 130 130" className="-rotate-90">
-                {/* Track */}
-                <circle
-                    cx="65" cy="65" r={R}
-                    fill="none"
-                    stroke="#1f2937"
-                    strokeWidth="10"
-                />
-                {/* Progress */}
+                <circle cx="65" cy="65" r={R} fill="none" stroke="#1f2937" strokeWidth="10" />
                 <circle
                     cx="65" cy="65" r={R}
                     fill="none"
@@ -79,9 +56,8 @@ function RiskRing({ score, color }) {
                     style={{ transition: 'stroke-dashoffset 1s ease-out' }}
                 />
             </svg>
-            {/* Centre label */}
             <div className="absolute flex flex-col items-center">
-                <span className="text-3xl font-bold text-white">{score}</span>
+                <span className="text-3xl font-bold text-white">{Math.round(score)}</span>
                 <span className="text-xs text-gray-500 -mt-0.5">/ 100</span>
             </div>
         </div>
@@ -91,17 +67,18 @@ function RiskRing({ score, color }) {
 /* ═══════════════════════════════════════════════════
    PROGRESS BAR
 ═══════════════════════════════════════════════════ */
-function ProgressBar({ value, color = 'bg-teal-500', label, pct }) {
+function ProgressBar({ color = 'bg-teal-500', label, pct }) {
+    const safePct = Math.min(100, Math.max(0, Math.round(pct || 0)))
     return (
         <div className="mb-3">
             <div className="flex justify-between text-xs mb-1">
                 <span className="text-gray-400">{label}</span>
-                <span className="text-gray-300 font-semibold">{pct}%</span>
+                <span className="text-gray-300 font-semibold">{safePct}%</span>
             </div>
             <div className="bg-gray-800 rounded-full h-2 overflow-hidden">
                 <div
                     className={`${color} h-2 rounded-full transition-all duration-1000`}
-                    style={{ width: `${pct}%` }}
+                    style={{ width: `${safePct}%` }}
                 />
             </div>
         </div>
@@ -129,8 +106,12 @@ function RiskScoreCard({ result }) {
         )
     }
 
-    const { overall, cardiac, anesthesia, surgical } = result
-    const level = riskLevel(overall)
+    const score = result.overall_risk_score ?? 0
+    const level = riskLevelStyle(result.risk_level)
+    const breakdown = result.risk_breakdown || {}
+    const cardiac = breakdown.cardiac_risk ?? 0
+    const anesthesia = breakdown.anesthesia_risk ?? 0
+    const surgical = breakdown.surgical_risk ?? 0
 
     return (
         <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
@@ -139,18 +120,29 @@ function RiskScoreCard({ result }) {
                     <Brain size={16} className="text-teal-400" />
                     <h3 className="text-white font-semibold text-sm">AI Risk Score</h3>
                 </div>
-                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full
-          ${level.label === 'High' ? 'bg-red-900/40 text-red-400 border border-red-800/40' :
-                        level.label === 'Medium' ? 'bg-amber-900/40 text-amber-400 border border-amber-800/40' :
-                            'bg-green-900/40 text-green-400 border border-green-800/40'}`}>
-                    {level.label} Risk
-                </span>
+                <div className="flex items-center gap-2">
+                    {result.asa_predicted && (
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-teal-900/40 text-teal-400 border border-teal-800/30">
+                            Predicted ASA {result.asa_predicted}
+                        </span>
+                    )}
+                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${level.badge}`}>
+                        {level.label} Risk
+                    </span>
+                </div>
             </div>
 
             {/* Ring */}
             <div className="flex justify-center mb-6">
-                <RiskRing score={overall} color={level.ring} />
+                <RiskRing score={score} color={level.ring} />
             </div>
+
+            {/* AI Summary */}
+            {result.ai_summary && (
+                <div className="mb-4 p-3 rounded-xl bg-teal-900/20 border border-teal-800/30">
+                    <p className="text-xs text-teal-300 leading-relaxed">{result.ai_summary}</p>
+                </div>
+            )}
 
             {/* Breakdown progress bars */}
             <div className="border-t border-gray-800 pt-4">
@@ -199,20 +191,23 @@ function DrugInteractionCard({ interactions, hasRun }) {
             {hasRun && interactions.length > 0 && (
                 <div className="space-y-2.5">
                     {interactions.map((item, i) => {
-                        const sev = SEV_STYLE[item.severity]
+                        const sev = SEV_STYLE[item.severity] || SEV_STYLE.LOW
                         return (
                             <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-gray-800/50 border border-gray-700/30">
                                 <AlertTriangle size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
                                 <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2 flex-wrap mb-0.5">
-                                        <span className="text-xs font-semibold text-white">{item.drug}</span>
+                                        <span className="text-xs font-semibold text-white">{item.drug_a}</span>
                                         <span className="text-gray-600 text-xs">+</span>
-                                        <span className="text-xs font-semibold text-white">{item.interacts}</span>
+                                        <span className="text-xs font-semibold text-white">{item.drug_b}</span>
                                         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${sev.badge}`}>
                                             {sev.label}
                                         </span>
                                     </div>
-                                    <p className="text-xs text-gray-400 truncate">{item.effect}</p>
+                                    <p className="text-xs text-gray-400">{item.description}</p>
+                                    {item.source && (
+                                        <p className="text-[10px] text-gray-600 mt-0.5">Source: {item.source}</p>
+                                    )}
                                 </div>
                             </div>
                         )
@@ -226,11 +221,42 @@ function DrugInteractionCard({ interactions, hasRun }) {
 /* ═══════════════════════════════════════════════════
    CARD 3 — PRE-OP CHECKLIST
 ═══════════════════════════════════════════════════ */
-function ChecklistCard({ hasRun }) {
-    const [checked, setChecked] = useState({})
-    const toggle = id => setChecked(prev => ({ ...prev, [id]: !prev[id] }))
-    const doneCount = Object.values(checked).filter(Boolean).length
-    const pct = Math.round((doneCount / CHECKLIST_ITEMS.length) * 100)
+function ChecklistCard({ checklistItems, hasRun }) {
+    // Local toggle state seeded from API response
+    const [localChecked, setLocalChecked] = useState({})
+
+    const toggle = useCallback((id) => {
+        setLocalChecked(prev => ({ ...prev, [id]: !prev[id] }))
+    }, [])
+
+    if (!hasRun || !checklistItems?.length) {
+        return (
+            <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                <div className="flex items-center gap-2 mb-4">
+                    <Sparkles size={16} className="text-teal-400" />
+                    <h3 className="text-white font-semibold text-sm">AI-Generated Checklist</h3>
+                </div>
+                <div className="flex flex-col items-center justify-center py-6 text-center">
+                    <ClipboardCheck size={22} className="text-gray-600 mb-2" />
+                    <p className="text-gray-500 text-sm">Checklist generates after AI assessment</p>
+                </div>
+            </div>
+        )
+    }
+
+    // Merge API checked state with local overrides
+    const isChecked = (item) =>
+        localChecked[item.id] !== undefined ? localChecked[item.id] : item.checked
+
+    const doneCount = checklistItems.filter(item => isChecked(item)).length
+    const total = checklistItems.length
+    const pct = Math.round((doneCount / total) * 100)
+
+    // Group by category if present
+    const categories = [...new Set(checklistItems.map(i => i.category).filter(Boolean))]
+    const grouped = categories.length > 0
+        ? categories.map(cat => ({ cat, items: checklistItems.filter(i => i.category === cat) }))
+        : [{ cat: null, items: checklistItems }]
 
     return (
         <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
@@ -239,55 +265,60 @@ function ChecklistCard({ hasRun }) {
                 <h3 className="text-white font-semibold text-sm">AI-Generated Checklist</h3>
             </div>
 
-            {!hasRun ? (
-                <div className="flex flex-col items-center justify-center py-6 text-center">
-                    <ClipboardCheck size={22} className="text-gray-600 mb-2" />
-                    <p className="text-gray-500 text-sm">Checklist generates after AI assessment</p>
-                </div>
-            ) : (
-                <>
-                    <div className="space-y-2 mb-5">
-                        {CHECKLIST_ITEMS.map(({ id, label }) => (
-                            <label
-                                key={id}
-                                className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-gray-800/50 cursor-pointer transition-colors group"
-                            >
-                                {/* Custom checkbox */}
-                                <div
-                                    className={`w-5 h-5 rounded-md border-2 flex items-center justify-center flex-shrink-0 transition-all
-                    ${checked[id]
-                                            ? 'bg-teal-600 border-teal-600'
-                                            : 'border-gray-600 group-hover:border-gray-500'}`}
-                                    onClick={() => toggle(id)}
-                                >
-                                    {checked[id] && (
-                                        <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-                                            <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                        </svg>
-                                    )}
-                                </div>
-                                <span className={`text-sm transition-colors ${checked[id] ? 'text-gray-500 line-through' : 'text-gray-200'}`}>
-                                    {label}
-                                </span>
-                            </label>
-                        ))}
+            <div className="space-y-4 mb-5">
+                {grouped.map(({ cat, items }) => (
+                    <div key={cat || 'default'}>
+                        {cat && (
+                            <p className="text-[10px] text-gray-500 uppercase tracking-widest font-medium mb-2">{cat}</p>
+                        )}
+                        <div className="space-y-1">
+                            {items.map((item) => {
+                                const checked = isChecked(item)
+                                return (
+                                    <label
+                                        key={item.id}
+                                        className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-gray-800/50 cursor-pointer transition-colors group"
+                                    >
+                                        <div
+                                            className={`w-5 h-5 rounded-md border-2 flex items-center justify-center flex-shrink-0 transition-all
+                                                ${checked ? 'bg-teal-600 border-teal-600' : 'border-gray-600 group-hover:border-gray-500'}`}
+                                            onClick={() => toggle(item.id)}
+                                        >
+                                            {checked && (
+                                                <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                                                    <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                                </svg>
+                                            )}
+                                        </div>
+                                        <div className="flex-1 flex items-center justify-between gap-2">
+                                            <span className={`text-sm transition-colors ${checked ? 'text-gray-500 line-through' : 'text-gray-200'}`}>
+                                                {item.label}
+                                            </span>
+                                            {item.required && !checked && (
+                                                <span className="text-[10px] text-red-400 font-semibold shrink-0">Required</span>
+                                            )}
+                                        </div>
+                                    </label>
+                                )
+                            })}
+                        </div>
                     </div>
+                ))}
+            </div>
 
-                    {/* Progress bar */}
-                    <div className="border-t border-gray-800 pt-4">
-                        <div className="flex justify-between text-xs mb-2">
-                            <span className="text-gray-400 font-medium">{doneCount} of {CHECKLIST_ITEMS.length} complete</span>
-                            <span className={`font-bold ${pct === 100 ? 'text-green-400' : 'text-teal-400'}`}>{pct}%</span>
-                        </div>
-                        <div className="bg-gray-800 rounded-full h-2 overflow-hidden">
-                            <div
-                                className={`h-2 rounded-full transition-all duration-500 ${pct === 100 ? 'bg-green-500' : 'bg-teal-500'}`}
-                                style={{ width: `${pct}%` }}
-                            />
-                        </div>
-                    </div>
-                </>
-            )}
+            {/* Progress bar */}
+            <div className="border-t border-gray-800 pt-4">
+                <div className="flex justify-between text-xs mb-2">
+                    <span className="text-gray-400 font-medium">{doneCount} of {total} complete</span>
+                    <span className={`font-bold ${pct === 100 ? 'text-green-400' : 'text-teal-400'}`}>{pct}%</span>
+                </div>
+                <div className="bg-gray-800 rounded-full h-2 overflow-hidden">
+                    <div
+                        className={`h-2 rounded-full transition-all duration-500 ${pct === 100 ? 'bg-green-500' : 'bg-teal-500'}`}
+                        style={{ width: `${pct}%` }}
+                    />
+                </div>
+            </div>
         </div>
     )
 }
@@ -311,47 +342,99 @@ function Field({ label, children }) {
     )
 }
 
+function ToggleField({ label, checked, onChange }) {
+    return (
+        <label className="flex items-center justify-between cursor-pointer py-1">
+            <span className="text-xs text-gray-400 font-medium">{label}</span>
+            <div
+                className={`w-9 h-5 rounded-full transition-colors relative ${checked ? 'bg-teal-600' : 'bg-gray-700'}`}
+                onClick={onChange}
+            >
+                <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : ''}`} />
+            </div>
+        </label>
+    )
+}
+
 /* ═══════════════════════════════════════════════════
    MAIN PAGE
 ═══════════════════════════════════════════════════ */
+const FORM_DEFAULTS = {
+    // display-only fields (kept for UX)
+    name: '',
+    age: '',
+    gender: '',
+    // API fields
+    surgery_type: 'Cardiac',
+    asa_class: 'II',
+    medications: '',
+    allergies: '',
+    diabetes: false,
+    hypertension: false,
+    cardiac_hx: false,
+    smoking: false,
+    weight_kg: '',
+    height_cm: '',
+    systolic_bp: '',
+    diastolic_bp: '',
+}
+
 export default function PreOpPage() {
-    const [form, setForm] = useState(FORM_DEFAULTS)
-    const [loading, setLoading] = useState(false)
-    const [result, setResult] = useState(null)
-    const [interactions, setInteractions] = useState([])
+    const { currentPatient, setLoading } = useAetheris()
+
+    const [formData, setFormData] = useState(FORM_DEFAULTS)
     const [hasRun, setHasRun] = useState(false)
+    const lastPayloadRef = useRef(null)
+
+    const {
+        data: assessmentResult,
+        loading: isRunning,
+        error,
+        execute: runAssess,
+        clearError,
+    } = useApiCall(runPreOpAssessment, {
+        onSuccess: () => setHasRun(true),
+    })
 
     const set = useCallback((key, val) =>
-        setForm(prev => ({ ...prev, [key]: val })), [])
+        setFormData(prev => ({ ...prev, [key]: val })), [])
 
-    /* Simulate AI risk calculation */
-    const runAssessment = useCallback(async () => {
-        setLoading(true)
-        await new Promise(r => setTimeout(r, 2200))
+    const buildPayload = useCallback(() => ({
+        patient_id: currentPatient?.id || 'p001',
+        surgery_type: formData.surgery_type,
+        asa_class: formData.asa_class,
+        medications: formData.medications
+            .split(/[,\n]/).map(m => m.trim()).filter(Boolean),
+        allergies: formData.allergies
+            .split(/[,\n]/).map(a => a.trim()).filter(Boolean),
+        diabetes: formData.diabetes,
+        hypertension: formData.hypertension,
+        cardiac_hx: formData.cardiac_hx,
+        smoking: formData.smoking,
+        weight_kg: formData.weight_kg ? Number(formData.weight_kg) : null,
+        height_cm: formData.height_cm ? Number(formData.height_cm) : null,
+        systolic_bp: formData.systolic_bp ? Number(formData.systolic_bp) : null,
+        diastolic_bp: formData.diastolic_bp ? Number(formData.diastolic_bp) : null,
+    }), [formData, currentPatient])
 
-        /* Pseudo-random but deterministic-ish score based on form inputs */
-        const base = parseInt(form.age || 40) > 60 ? 20 : 5
-        const asaBonus = { I: 0, II: 10, III: 25, IV: 40, V: 60 }[form.asa] ?? 15
-        const surgBonus = { Cardiac: 30, Neuro: 20, Orthopedic: 10, General: 5 }[form.surgeryType] ?? 10
-        const allergyBonus = form.allergies.trim().length > 0 ? 5 : 0
-        const medBonus = form.medications.trim().length > 5 ? 8 : 0
+    const handleAssess = useCallback(async () => {
+        setLoading('preop', true)
+        const payload = buildPayload()
+        lastPayloadRef.current = payload
+        await runAssess(payload)
+        setLoading('preop', false)
+    }, [buildPayload, runAssess, setLoading])
 
-        const overall = Math.min(99, base + asaBonus + surgBonus + allergyBonus + medBonus)
-        const cardiac = Math.min(99, Math.round(overall * 0.9 + Math.random() * 10))
-        const anesthesia = Math.min(99, Math.round(overall * 0.7 + Math.random() * 15))
-        const surgical = Math.min(99, Math.round(overall * 0.8 + Math.random() * 12))
+    const handleRetry = useCallback(async () => {
+        if (!lastPayloadRef.current) return
+        clearError()
+        setLoading('preop', true)
+        await runAssess(lastPayloadRef.current)
+        setLoading('preop', false)
+    }, [clearError, runAssess, setLoading])
 
-        /* Drug interactions — show some if medications text is non-empty */
-        const meds = form.medications.trim()
-        const detected = meds.length > 3
-            ? SAMPLE_INTERACTIONS.slice(0, meds.split('\n').length > 1 ? 3 : 1)
-            : []
-
-        setResult({ overall, cardiac, anesthesia, surgical })
-        setInteractions(detected)
-        setHasRun(true)
-        setLoading(false)
-    }, [form])
+    const drug_interactions = assessmentResult?.drug_interactions ?? []
+    const checklist = assessmentResult?.checklist ?? []
 
     return (
         <div className="animate-fadeIn">
@@ -376,11 +459,12 @@ export default function PreOpPage() {
                         </div>
 
                         <div className="space-y-4">
+                            {/* ── Display-only fields ── */}
                             <Field label="Patient Name">
                                 <input
                                     type="text"
                                     placeholder="Full name"
-                                    value={form.name}
+                                    value={formData.name}
                                     onChange={e => set('name', e.target.value)}
                                     className={inputClass}
                                 />
@@ -392,14 +476,14 @@ export default function PreOpPage() {
                                         type="number"
                                         placeholder="Years"
                                         min={0} max={130}
-                                        value={form.age}
+                                        value={formData.age}
                                         onChange={e => set('age', e.target.value)}
                                         className={inputClass}
                                     />
                                 </Field>
                                 <Field label="Gender">
                                     <select
-                                        value={form.gender}
+                                        value={formData.gender}
                                         onChange={e => set('gender', e.target.value)}
                                         className={inputClass + ' appearance-none cursor-pointer'}
                                     >
@@ -412,13 +496,13 @@ export default function PreOpPage() {
                                 </Field>
                             </div>
 
+                            {/* ── API fields ── */}
                             <Field label="Surgery Type">
                                 <select
-                                    value={form.surgeryType}
-                                    onChange={e => set('surgeryType', e.target.value)}
+                                    value={formData.surgery_type}
+                                    onChange={e => set('surgery_type', e.target.value)}
                                     className={inputClass + ' appearance-none cursor-pointer'}
                                 >
-                                    <option value="" disabled>Select procedure</option>
                                     <option value="Cardiac">Cardiac</option>
                                     <option value="Orthopedic">Orthopedic</option>
                                     <option value="Neuro">Neuro</option>
@@ -428,50 +512,105 @@ export default function PreOpPage() {
 
                             <Field label="ASA Classification">
                                 <select
-                                    value={form.asa}
-                                    onChange={e => set('asa', e.target.value)}
+                                    value={formData.asa_class}
+                                    onChange={e => set('asa_class', e.target.value)}
                                     className={inputClass + ' appearance-none cursor-pointer'}
                                 >
-                                    <option value="" disabled>Select class</option>
-                                    <option value="I">Class I — Normal healthy patient</option>
+                                    <option value="I">Class I — Normal healthy</option>
                                     <option value="II">Class II — Mild systemic disease</option>
                                     <option value="III">Class III — Severe systemic disease</option>
                                     <option value="IV">Class IV — Life-threatening disease</option>
-                                    <option value="V">Class V — Moribund patient</option>
+                                    <option value="V">Class V — Moribund</option>
                                 </select>
                             </Field>
 
+                            <div className="grid grid-cols-2 gap-3">
+                                <Field label="Weight (kg)">
+                                    <input
+                                        type="number" placeholder="e.g. 75"
+                                        value={formData.weight_kg}
+                                        onChange={e => set('weight_kg', e.target.value)}
+                                        className={inputClass}
+                                    />
+                                </Field>
+                                <Field label="Height (cm)">
+                                    <input
+                                        type="number" placeholder="e.g. 170"
+                                        value={formData.height_cm}
+                                        onChange={e => set('height_cm', e.target.value)}
+                                        className={inputClass}
+                                    />
+                                </Field>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <Field label="Systolic BP">
+                                    <input
+                                        type="number" placeholder="mmHg"
+                                        value={formData.systolic_bp}
+                                        onChange={e => set('systolic_bp', e.target.value)}
+                                        className={inputClass}
+                                    />
+                                </Field>
+                                <Field label="Diastolic BP">
+                                    <input
+                                        type="number" placeholder="mmHg"
+                                        value={formData.diastolic_bp}
+                                        onChange={e => set('diastolic_bp', e.target.value)}
+                                        className={inputClass}
+                                    />
+                                </Field>
+                            </div>
+
                             <Field label="Known Allergies">
                                 <textarea
-                                    placeholder="List allergies (one per line)…"
-                                    value={form.allergies}
+                                    placeholder="List allergies (comma or one per line)…"
+                                    value={formData.allergies}
                                     onChange={e => set('allergies', e.target.value)}
-                                    rows={3}
+                                    rows={2}
                                     className={inputClass + ' resize-none leading-relaxed'}
                                 />
                             </Field>
 
                             <Field label="Current Medications">
                                 <textarea
-                                    placeholder="List medications (one per line)…"
-                                    value={form.medications}
+                                    placeholder="List medications (comma or one per line)…"
+                                    value={formData.medications}
                                     onChange={e => set('medications', e.target.value)}
-                                    rows={3}
+                                    rows={2}
                                     className={inputClass + ' resize-none leading-relaxed'}
                                 />
                             </Field>
+
+                            {/* Medical history toggles */}
+                            <div className="bg-gray-800/50 rounded-xl px-4 py-3 border border-gray-700/40 space-y-1.5">
+                                <p className="text-[10px] text-gray-500 uppercase tracking-widest font-medium mb-2">Medical History</p>
+                                <ToggleField label="Diabetes" checked={formData.diabetes} onChange={() => set('diabetes', !formData.diabetes)} />
+                                <ToggleField label="Hypertension" checked={formData.hypertension} onChange={() => set('hypertension', !formData.hypertension)} />
+                                <ToggleField label="Cardiac Hx" checked={formData.cardiac_hx} onChange={() => set('cardiac_hx', !formData.cardiac_hx)} />
+                                <ToggleField label="Smoking" checked={formData.smoking} onChange={() => set('smoking', !formData.smoking)} />
+                            </div>
                         </div>
+
+                        {/* Error banner */}
+                        {error && (
+                            <ApiErrorBanner
+                                error={error}
+                                onRetry={handleRetry}
+                                onDismiss={clearError}
+                            />
+                        )}
 
                         {/* CTA */}
                         <button
-                            onClick={runAssessment}
-                            disabled={loading}
+                            onClick={handleAssess}
+                            disabled={isRunning}
                             className={`w-full mt-5 rounded-xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-all
-                ${loading
+                                ${isRunning
                                     ? 'bg-teal-700 text-teal-200 cursor-not-allowed'
                                     : 'bg-teal-600 hover:bg-teal-500 text-white shadow-lg shadow-teal-900/30 active:scale-[0.98]'}`}
                         >
-                            {loading ? (
+                            {isRunning ? (
                                 <>
                                     <LoadingSpinner size="sm" color="white" />
                                     Analysing…
@@ -484,7 +623,7 @@ export default function PreOpPage() {
                             )}
                         </button>
 
-                        {result && !loading && (
+                        {assessmentResult && !isRunning && (
                             <p className="text-center text-xs text-gray-500 mt-3 font-medium">
                                 ✓ Assessment complete · {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </p>
@@ -494,9 +633,9 @@ export default function PreOpPage() {
 
                 {/* ── RIGHT PANEL: Three stacked cards ────── */}
                 <div className="col-span-2 flex flex-col gap-5">
-                    <RiskScoreCard result={result} />
-                    <DrugInteractionCard interactions={interactions} hasRun={hasRun} />
-                    <ChecklistCard hasRun={hasRun} />
+                    <RiskScoreCard result={assessmentResult} />
+                    <DrugInteractionCard interactions={drug_interactions} hasRun={hasRun} />
+                    <ChecklistCard checklistItems={checklist} hasRun={hasRun} />
                 </div>
 
             </div>

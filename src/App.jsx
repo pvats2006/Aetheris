@@ -1,14 +1,17 @@
 import { BrowserRouter } from 'react-router-dom'
 import Layout from './components/layout/Layout'
+import { AetherisProvider } from './context/AetherisContext'
 
 /**
- * App — thin root that wraps the router around the Layout shell.
- * All state (theme, sidebar, notifications, routes) lives in Layout.
+ * App — thin root.
+ * AetherisProvider supplies global state to the entire tree.
  */
 export default function App() {
   return (
-    <BrowserRouter>
-      <Layout />
-    </BrowserRouter>
+    <AetherisProvider>
+      <BrowserRouter>
+        <Layout />
+      </BrowserRouter>
+    </AetherisProvider>
   )
 }
